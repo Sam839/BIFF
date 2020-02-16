@@ -49,6 +49,7 @@ from BIFF import BIFF
 
 # Encode
 bf = BIFF("Name for BIFF data packet", "Description for BIFF data packet", {
+	# <DATA NAME>: <DATA>
 	b'Test.txt': b'Hello, World!',
 	b'\xde\xed\xbe\xef': b'0xDEEDBEEF',
 })
