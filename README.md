@@ -1,5 +1,8 @@
 # BIFF
-Binary Interchange File Format
+Binary Interchange File Format 
+
+# Warning
+To work, you need module `multimethod` (https://pypi.org/project/multimethod/)
 
 # BIFF classes
 ```
