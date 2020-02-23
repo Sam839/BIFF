@@ -1,10 +1,12 @@
 from uuid import UUID
+from datetime import datetime
+from time import time_ns
 from struct import pack as STRUCT_PACK, unpack as STRUCT_UNPACK
 from io import BytesIO, SEEK_CUR, SEEK_END, IOBase
 from typing import NoReturn
 from types import FunctionType
-from datetime import datetime
-from time import time_ns
+from enum import IntEnum
+from zlib import compress as ZLIB_COMPRESS, decompress as ZLIB_DECOMPRESS, compressobj as ZLIB_COMPRESS_OBJ, decompressobj as ZLIB_DECOMPRESS_OBJ, DEFLATED as ZLIB_DEFLATED, MAX_WBITS as ZLIB_MAX_WBITS, DEF_MEM_LEVEL as ZLIB_DEF_MEM_LEVEL, Z_DEFAULT_STRATEGY as ZLIB_DEFAULT_STRATEGY
 
 XDR_UUID = UUID('0a8f2fe8-87ba-5235-8fbc-9fc82c694485') # DO NOT EDIT!
 
@@ -12,6 +14,231 @@ try:
 	from multimethod import multimethod
 except ModuleNotFoundError:
 	raise Exception('Error. Module not found! Install `multimethod` (pip install multimethod)')
+
+class IceKey(object):
+	# Modulo values for the S-boxes
+	__rMOD = [
+		[ 0x14D, 0x139, 0x1F9, 0x171 ],
+		[ 0x17B, 0x177, 0x13F, 0x187 ],
+		[ 0x169, 0x1BD, 0x1C9, 0x18D ],
+		[ 0x18D, 0x1A9, 0x18B, 0x1F9 ],
+	]
+	# XOR values for the S-boxes
+	__rXOR = [
+		[ 0x83, 0x85, 0x9B, 0xCD ],
+		[ 0xCC, 0xA7, 0xAD, 0x41 ],
+		[ 0x4B, 0x2E, 0xD4, 0x33 ],
+		[ 0xEA, 0xCB, 0x2E, 0x04 ],
+	]
+	# Expanded permutation values for the P-box
+	__rPBOX = [
+		0x00000001, 0x00000080, 0x00000400, 0x00002000,
+		0x00080000, 0x00200000, 0x01000000, 0x40000000,
+		0x00000008, 0x00000020, 0x00000100, 0x00004000,
+		0x00010000, 0x00800000, 0x04000000, 0x20000000,
+		0x00000004, 0x00000010, 0x00000200, 0x00008000,
+		0x00020000, 0x00400000, 0x08000000, 0x10000000,
+		0x00000002, 0x00000040, 0x00000800, 0x00001000,
+		0x00040000, 0x00100000, 0x02000000, 0x80000000,
+	]
+	# The key rotation schedule
+	__rKEYROT = [
+		0, 1, 2, 3, 2, 1, 3, 0,
+		1, 3, 2, 0, 3, 1, 0, 2,
+	]
+	__rKEY_SCHEDULE = dict()
+	__rSBOX = dict()
+	__rSBOX_INITIALISED = False
+	__rSIZE = 0
+	__rROUNDS = 0
+	'''
+	Galois Field multiplication of a by b, modulo m.
+	Just like arithmetic multiplication, except that additions and subtractions are replaced by XOR.
+	'''
+	def gf_mult(self, a:int, b:int, m:int) -> int:
+		res = 0
+		while b:
+			if b & 1:
+				res ^= a
+			a <<= 1
+			b >>= 1
+			if a >= 256:
+				a ^= m
+		return res
+	'''
+	Galois Field exponentiation.
+	Raise the base to the power of 7, modulo m.
+	'''
+	def gf_exp7(self, b:int, m:int) -> int:
+		if b == 0:
+			return 0
+		x = self.gf_mult(b, b, m)
+		x = self.gf_mult(b, x, m)
+		x = self.gf_mult(x, x, m)
+		return self.gf_mult(b, x, m)
+	'''
+	Carry out the ICE 32-bit P-box permutation.
+	'''
+	def perm32(self, x:int) -> int:
+		res = 0
+		i = 0
+		while x:
+			if (x & 1):
+				res |= self.__rPBOX[i % len(self.__rPBOX)]
+			i += 1
+			x >>= 1
+		return res
+	'''
+	Create a new ICE object.
+	'''
+	def __init__(self, n:int, key:bytes):
+		if self.__rSBOX_INITIALISED != True:
+			self.__rSBOX.clear()
+			for i in range(0, 4):
+				self.__rSBOX[i] = dict()
+				for l in range(0, 1024):
+					self.__rSBOX[i][l] = 0x00
+			for i in range(0, 1024):
+				col = (i >> 1) & 0xFF
+				row = (i & 0x1) | ((i & 0x200) >> 8)
+				self.__rSBOX[0][i] = self.perm32(self.gf_exp7(col ^ self.__rXOR[0][row], self.__rMOD[0][row]) << 24)
+				self.__rSBOX[1][i] = self.perm32(self.gf_exp7(col ^ self.__rXOR[1][row], self.__rMOD[1][row]) << 16)
+				self.__rSBOX[2][i] = self.perm32(self.gf_exp7(col ^ self.__rXOR[2][row], self.__rMOD[2][row]) << 8)
+				self.__rSBOX[3][i] = self.perm32(self.gf_exp7(col ^ self.__rXOR[3][row], self.__rMOD[3][row]))
+			self.__rSBOX_INITIALISED = True
+		if n < 1:
+			self.__rSIZE = 1
+			self.__rROUNDS = 8
+		else:
+			self.__rSIZE = n
+			self.__rROUNDS = n * 16
+		for i in range(0, self.__rROUNDS):
+			self.__rKEY_SCHEDULE[i] = dict()
+			for j in range(0, 4):
+				self.__rKEY_SCHEDULE[i][j] = 0x00
+		if self.__rROUNDS == 8:
+			kb = [ 0x00 ] * 4
+			for i in range(0, 4):
+				kb[3 - i] = (key[i * 2] << 8) | key[i * 2 + 1]
+			for i in range(0, 8):
+				kr = self.__rKEYROT[i]
+				isk = self.__rKEY_SCHEDULE[i]
+				for j in range(0, 15):
+					for k in range(0, 4): 
+						bit = kb[(kr + k) & 3] & 1
+						isk[j % 3] = (isk[j % 3] << 1) | bit
+						kb[(kr + k) & 3] = (kb[(kr + k) & 3] >> 1) | ((bit ^ 1) << 15)
+		for i in range(0, self.__rSIZE):
+			kb = [ 0x00 ] * 4
+			for j in range(0, 4):
+				kb[3 - j] = (key[i * 8 + j * 2] << 8) | key[i * 8 + j * 2 + 1]
+			for l in range(0, 8):
+				kr = self.__rKEYROT[l]
+				isk = self.__rKEY_SCHEDULE[((i * 8) + l) % len(self.__rKEY_SCHEDULE)]
+				for j in range(0, 15):
+					for k in range(0, 4):
+						bit = kb[(kr + k) & 3] & 1
+						isk[j % 3] = (isk[j % 3] << 1) | bit
+						kb[(kr + k) & 3] = (kb[(kr + k) & 3] >> 1) | ((bit ^ 1) << 15)
+			for l in range(0, 8):
+				kr = self.__rKEYROT[8 + l]
+				isk = self.__rKEY_SCHEDULE[((self.__rROUNDS - 8 - i * 8) + l) % len(self.__rKEY_SCHEDULE)]
+				for j in range(0, 15): 
+					for k in range(0, 4):
+						bit = kb[(kr + k) & 3] & 1
+						isk[j % 3] = (isk[j % 3] << 1) | bit
+						kb[(kr + k) & 3] = (kb[(kr + k) & 3] >> 1) | ((bit ^ 1) << 15)
+	'''
+	The single round ICE f function.
+	'''
+	def _ice_f(self, p:int, sk:int) -> int:
+		tl = ((p >> 16) & 0x3FF) | (((p >> 14) | (p << 18)) & 0xFFC00)
+		tr = (p & 0x3FF) | ((p << 2) & 0xFFC00)
+		al = sk[2] & (tl ^ tr)
+		ar = al ^ tr
+		al ^= tl
+		al ^= sk[0]
+		ar ^= sk[1]
+		return self.__rSBOX[0][al >> 10] | self.__rSBOX[1][al & 0x3FF] | self.__rSBOX[2][ar >> 10] | self.__rSBOX[3][ar & 0x3FF]
+	'''
+	Return the key size, in bytes.
+	'''
+	def KeySize(self) -> int:
+		return self.__rSIZE * 8
+	'''
+	Return the block size, in bytes.
+	'''
+	def BlockSize(self) -> int:
+		return 8
+	'''
+	Encrypt a block of 8 bytes of data with the given ICE key.
+	'''
+	def EncryptBlock(self, data:list) -> list:
+		out = [ 0x00 ] * 8
+		l = 0
+		r = 0
+		for i in range(0, 4):
+			l |= (data[i] & 0xFF) << (24 - i * 8)
+			r |= (data[i + 4] & 0xFF) << (24 - i * 8)
+		for i in range(0, self.__rROUNDS, 2):
+			l ^= self._ice_f(r, self.__rKEY_SCHEDULE[i])
+			r ^= self._ice_f(l, self.__rKEY_SCHEDULE[i + 1])
+		for i in range(0, 4):
+			out[3 - i] = r & 0xFF
+			out[7 - i] = l & 0xFF
+			r >>= 8
+			l >>= 8
+		return out
+	'''
+	Decrypt a block of 8 bytes of data with the given ICE key.
+	'''
+	def DecryptBlock(self, data:list) -> list:
+		out = [ 0x00 ] * 8
+		l = 0
+		r = 0
+		for i in range(0, 4):
+			l |= (data[i] & 0xFF) << (24 - i * 8)
+			r |= (data[i + 4] & 0xFF) << (24 - i * 8)
+		for i in range(self.__rROUNDS - 1, 0, -2):
+			l ^= self._ice_f(r, self.__rKEY_SCHEDULE[i])
+			r ^= self._ice_f(l, self.__rKEY_SCHEDULE[i - 1])
+		for i in range(0, 4):
+			out[3 - i] = r & 0xFF
+			out[7 - i] = l & 0xFF
+			r >>= 8
+			l >>= 8
+		return out
+	'''
+	Encrypt the data byte array with the given ICE key.
+	'''
+	def Encrypt(self, data:bytes) -> bytes:
+		out = []
+		blocksize = self.BlockSize()
+		bytesleft = len(data)
+		i = 0
+		while bytesleft >= blocksize:
+			out.extend(self.EncryptBlock(data[i:i + blocksize]))
+			bytesleft -= blocksize
+			i += blocksize
+		if bytesleft > 0:
+			out.extend(data[len(data)-bytesleft:len(data)])
+		return bytes(out)
+	'''
+	Decrypt the data byte array with the given ICE key.
+	'''
+	def Decrypt(self, data:bytes) -> bytes:
+		out = []
+		blocksize = self.BlockSize()
+		bytesleft = len(data)
+		i = 0
+		while bytesleft >= blocksize:
+			out.extend(self.DecryptBlock(data[i:i + blocksize]))
+			bytesleft -= blocksize
+			i += blocksize
+		if bytesleft > 0:
+			out.extend(data[len(data)-bytesleft:len(data)])
+		return bytes(out)
+
 
 from hashlib import sha512 as SHA_512_NEW
 @multimethod
@@ -30,6 +257,7 @@ __description__ = 'Binary Interchange File Format'
 __version__ = '2.1.0'
 
 __all__ = [
+	'FlagsBIFF',
 	'BIFF',
 	'ByteArray',
 	'BinaryIO',
@@ -142,6 +370,10 @@ class BinaryBits(object, metaclass=MetaClass):
 		mask = 1 << pos
 		return num | mask
 	@staticmethod
+	def ToggleBit(num:int, pos:int) -> int:
+		mask = 1 << pos
+		return num ^ mask
+	@staticmethod
 	def ClearBit(num:int, pos:int) -> int:
 		mask = 1 << pos
 		return num & ~mask
@@ -156,6 +388,7 @@ class BinaryBits(object, metaclass=MetaClass):
 		subsets = list()
 		for i in range(stop):
 			subsets.append(int(num & (1 << i) != 0))
+		subsets.reverse()
 		return subsets
 	@staticmethod
 	def CountBits(num:int) -> int:
@@ -555,6 +788,35 @@ class BinaryFormat(BaseBinaryFormat, metaclass=MetaClass):
 		buf[0:len(data)] = data
 		return self.__IO.write(buf)
 
+
+class FlagsBIFF(IntEnum):
+	FL_NONE = 0
+	FL_DEFAULT = (1 << 0)
+	FL_ENCRYPTED_ICE = (1 << 1)
+#	FL_ENCRYPTED_AES = (1 << 2)
+	FL_COMPRESSED_ZLIB = (1 << 3)
+	FL_COMPRESSED_DEFLATE = (1 << 4)
+#	FL_RESERVED = (1 << 5)
+#	FL_RESERVED = (1 << 6)
+#	FL_RESERVED = (1 << 7)
+	@staticmethod
+	def FlagsToSubSets(flags:int) -> list:
+		if flags == 0:
+			return [ FlagsBIFF.FL_NONE ]
+		out = []
+		subsets = BinaryBits.GetSubSets(flags, stop=8)
+		if subsets[3]:
+			out.append(FlagsBIFF.FL_COMPRESSED_DEFLATE)
+		if subsets[4]:
+			out.append(FlagsBIFF.FL_COMPRESSED_ZLIB)
+		#if subsets[5]:
+		#	out.append(FlagsBIFF.FL_ENCRYPTED_AES)
+		if subsets[6]:
+			out.append(FlagsBIFF.FL_ENCRYPTED_ICE)
+		if subsets[7]:
+			out.append(FlagsBIFF.FL_DEFAULT)
+		return out
+
 class BIFF(object, metaclass=MetaClass):
 	__IO:IOBase = None
 	__BF:BinaryFormat = None
@@ -566,8 +828,8 @@ class BIFF(object, metaclass=MetaClass):
 	__DELIMITER:ByteArray = ByteArray('\x82')
 	__IsEncoded:bool = False
 	__IsSupport:bool = False
-	__BIFF_VERSION:int = 210
-	__BIFF_ENCODER_VERSION:int = 110
+	__BIFF_VERSION:int = 211
+	__BIFF_ENCODER_VERSION:int = 111
 	@multimethod
 	def __init__(self, io:IOBase) -> NoReturn:
 		self.__IO = io
@@ -616,7 +878,7 @@ class BIFF(object, metaclass=MetaClass):
 	def __SetIO(self, new_io:IOBase) -> NoReturn:
 		self.__IO = new_io
 	IO = property(__GetIO, __SetIO)
-	def Encode(self) -> bool:
+	def Encode(self, encoder_flags:int=FlagsBIFF.FL_NONE, ice_password:bytes=XDR_UUID.bytes) -> bool:
 		if self.__IsEncoded:
 			return False
 		self.__BF.WriteRAW(self.__BIFF_HEADER, size=len(self.__BIFF_HEADER)) # BIFF HEADER
@@ -624,6 +886,7 @@ class BIFF(object, metaclass=MetaClass):
 		self.__BF.WriteRAW(XDR_UUID.bytes, size=16) # XDR_UUID
 		self.__BF.WriteUnsignedShortInt(self.__BIFF_VERSION) # BIFF VERSION
 		self.__BF.WriteUnsignedShortInt(self.__BIFF_ENCODER_VERSION) # ENCODER VERSION
+		self.__BF.WriteUnsignedShortInt(encoder_flags) # ENCODER FLAGS
 		bits = BinaryBits.BigIntToBits(time_ns(), 64)
 		self.__BF.WriteUnsignedLongLongInt(len(bits)) # TIME PART COUNT
 		for ptime in bits:
@@ -637,12 +900,40 @@ class BIFF(object, metaclass=MetaClass):
 		self.__BF.WriteString(self.__DESCRIPTION, size=len(self.__DESCRIPTION)) # DESCRIPTION
 		self.__BF.WriteRAW(self.__DELIMITER, size=len(self.__DELIMITER)) # DELIMITER
 		for d_name in self.__DATA:
+			d_data = self.__DATA[d_name]
+			if isinstance(d_name, str):
+				d_name = d_name.encode()
+			if ((type(d_name) != bytes) & (type(d_name) != bytearray) & (type(d_name) != ByteArray)):
+				d_name = str(d_name).encode()
+			if isinstance(d_data, str):
+				d_data = d_data.encode()
+			if ((type(d_data) != bytes) & (type(d_data) != bytearray) & (type(d_data) != ByteArray)):
+				d_data = str(d_data).encode()
+			settings = dict()
+			settings['FL_ENCRYPTED_ICE'] = False
+			settings['FL_COMPRESSED_ZLIB'] = False
+			settings['FL_COMPRESSED_DEFLATE'] = False
+			for setting in FlagsBIFF.FlagsToSubSets(encoder_flags):
+				if setting == FlagsBIFF.FL_ENCRYPTED_ICE:
+					settings['FL_ENCRYPTED_ICE'] = True
+				if setting == FlagsBIFF.FL_COMPRESSED_ZLIB:
+					settings['FL_COMPRESSED_ZLIB'] = True
+				if setting == FlagsBIFF.FL_COMPRESSED_DEFLATE:
+					settings['FL_COMPRESSED_DEFLATE'] = True
+			d_hash = SHA512(d_data)
+			if settings['FL_COMPRESSED_ZLIB']:
+				d_data = ZLIB_COMPRESS(d_data)
+			if settings['FL_COMPRESSED_DEFLATE']:
+				obj = ZLIB_COMPRESS_OBJ(9, ZLIB_DEFLATED, -ZLIB_MAX_WBITS, ZLIB_DEF_MEM_LEVEL, ZLIB_DEFAULT_STRATEGY)
+				c_data = ByteArray(obj.compress(d_data))
+				c_data.extend(obj.flush())
+				d_data = c_data
+			if settings['FL_ENCRYPTED_ICE']:
+				d_data = IceKey(8, SHA512(ice_password)).Encrypt(d_data)
 			self.__BF.WriteRAW(self.__DATA_HEADER, size=len(self.__DATA_HEADER)) # DATA HEADER
 			self.__BF.WriteRAW(self.__DELIMITER, size=len(self.__DELIMITER)) # DELIMITER
 			self.__BF.WriteUnsignedLongLongInt(len(d_name)) # DATA NAME SIZE
-			d_data = self.__DATA[d_name]
 			self.__BF.WriteUnsignedLongLongInt(len(d_data)) # DATA SIZE
-			d_hash = SHA512(d_data)
 			self.__BF.WriteRAW(d_hash, size=64) # DATA HASH
 			bits = BinaryBits.BigIntToBits(time_ns(), 64)
 			self.__BF.WriteUnsignedLongLongInt(len(bits)) # DATA TIME PART COUNT
@@ -657,16 +948,19 @@ class BIFF(object, metaclass=MetaClass):
 		data = self.__IO.read()
 		self.__IO.seek(current)
 		return data
-	def Decode(self) -> bool:
+	def Decode(self, ice_password:bytes=XDR_UUID.bytes) -> bool:
 		if self.__IsEncoded != True:
 			return False
 		if self.__IsSupport != True:
 			return False
 		header = self.__BF.ReadRAW(size=len(self.__BIFF_HEADER)) # BIFF HEADER
+		if header != self.__BIFF_HEADER:
+			return False
 		self.__BF.ReadRAW(size=len(self.__DELIMITER)) # DELIMITER
 		uuid = self.__BF.ReadRAW(size=16) # XDR_UUID
 		biff_version = self.__BF.ReadUnsignedShortInt() # BIFF VERSION
 		encoder_version = self.__BF.ReadUnsignedShortInt() # ENCODER VERSION
+		encoder_flags = self.__BF.ReadUnsignedShortInt() # ENCODER FLAGS
 		ptime_cnt = self.__BF.ReadUnsignedLongLongInt() # TIME PART COUNT
 		bits = []
 		for i in range(ptime_cnt):
@@ -698,10 +992,31 @@ class BIFF(object, metaclass=MetaClass):
 			d_name = self.__BF.ReadRAW(size=d_name_size) # DATA NAME
 			self.__BF.ReadRAW(size=len(self.__DELIMITER)) # DELIMITER
 			d_data = self.__BF.ReadRAW(size=d_size) # DATA
+			settings = dict()
+			settings['FL_ENCRYPTED_ICE'] = False
+			settings['FL_COMPRESSED_ZLIB'] = False
+			settings['FL_COMPRESSED_DEFLATE'] = False
+			for setting in FlagsBIFF.FlagsToSubSets(encoder_flags):
+				if setting == FlagsBIFF.FL_ENCRYPTED_ICE:
+					settings['FL_ENCRYPTED_ICE'] = True
+				if setting == FlagsBIFF.FL_COMPRESSED_ZLIB:
+					settings['FL_COMPRESSED_ZLIB'] = True
+				if setting == FlagsBIFF.FL_COMPRESSED_DEFLATE:
+					settings['FL_COMPRESSED_DEFLATE'] = True
+			if settings['FL_ENCRYPTED_ICE']:
+				d_data = IceKey(8, SHA512(ice_password)).Decrypt(d_data)
+			if settings['FL_COMPRESSED_DEFLATE']:
+				obj = ZLIB_DECOMPRESS_OBJ(-ZLIB_MAX_WBITS)
+				c_data = ByteArray(obj.decompress(d_data))
+				c_data.extend(obj.flush())
+				d_data = c_data.ToBytes()
+			if settings['FL_COMPRESSED_ZLIB']:
+				d_data = ZLIB_DECOMPRESS(d_data)
 			data[d_name] = dict()
 			data[d_name]['size'] = d_size
 			data[d_name]['sha512'] = d_hash.hex().upper()
 			data[d_name]['time'] = TimeFromStamp(d_time)
 			data[d_name]['data'] = d_data
 			data[d_name]['verified'] = (d_hash == SHA512(d_data))
-		return {'BIFF': {'uuid': UUID(bytes=uuid).__str__(), 'verified': (uuid == XDR_UUID.bytes), 'version': biff_version, 'time': TimeFromStamp(time), 'name': name, 'description': description}, 'DATA': data}
+		return {'BIFF': {'uuid': UUID(bytes=uuid).__str__(), 'verified': (uuid == XDR_UUID.bytes), 'biff_version': biff_version, 'encoder_version': encoder_version, 'encoder_flags': encoder_flags, 'time': TimeFromStamp(time), 'name': name, 'description': description}, 'DATA': data}
+
