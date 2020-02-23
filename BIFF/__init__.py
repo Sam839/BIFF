@@ -254,7 +254,7 @@ def SHA512(data:int) -> bytes:
 
 __name__ = 'BIFF'
 __description__ = 'Binary Interchange File Format'
-__version__ = '2.1.0'
+__version__ = '4.0.0'
 
 __all__ = [
 	'FlagsBIFF',
