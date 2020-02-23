@@ -6,6 +6,13 @@ To work, you need module `multimethod` (https://pypi.org/project/multimethod/)
 
 # BIFF classes
 ```
+# FlagsBIFF
+FlagsBIFF.FL_NONE = 0
+FlagsBIFF.FL_DEFAULT = 1
+FlagsBIFF.FL_ENCRYPTED_ICE = 2
+FlagsBIFF.FL_COMPRESSED_ZLIB = 8
+FlagsBIFF.FL_COMPRESSED_DEFLATE = 16
+
 # BIFF
 BIFF(io:IOBase) # Supports `Decode`
 BIFF(data:bytes) # Supports `Decode`
@@ -48,15 +55,16 @@ BinaryIO->GetData() # Get all data from the IO buffer
 
 # Example
 ```
-from BIFF import BIFF
+from BIFF import BIFF, FlagsBIFF
 
 # Encode
 bf = BIFF("Name for BIFF data packet", "Description for BIFF data packet", {
 	# <DATA NAME>: <DATA>
-	b'Test.txt': b'Hello, World!',
+	b'Test.txt': 'Hello, World!',
 	b'\xde\xed\xbe\xef': b'0xDEEDBEEF',
+	'tester': b'No',
 })
-data = bf.Encode()
+data = bf.Encode(FlagsBIFF.FL_ENCRYPTED_ICE | FlagsBIFF.FL_COMPRESSED_DEFLATE)
 
 # Decode
 bf = BIFF(data)
@@ -66,8 +74,9 @@ data = bf.Decode()
 print('#' * 32)
 print('[+] BIFF UUID: {}'.format(data['BIFF']['uuid']))
 print('[+] BIFF UUID VALID: {}'.format(data['BIFF']['verified']))
-print('[+] BIFF VERSION: {}'.format(data['BIFF']['version']))
-print('[+] BIFF UUID: {}'.format(data['BIFF']['uuid']))
+print('[+] BIFF VERSION: {}'.format(data['BIFF']['biff_version']))
+print('[+] BIFF ENCODER VERSION: {}'.format(data['BIFF']['encoder_version']))
+print('[+] BIFF ENCODER FLAGS: {}'.format(data['BIFF']['encoder_flags']))
 print('[+] BIFF TIME: {}'.format(data['BIFF']['time']))
 print('[+] BIFF NAME: {}'.format(data['BIFF']['name']))
 print('[+] BIFF DESCRIPTION: {}'.format(data['BIFF']['description']))
@@ -85,8 +94,9 @@ for data_name in data['DATA']:
 ################################
 [+] BIFF UUID: 0a8f2fe8-87ba-5235-8fbc-9fc82c694485      
 [+] BIFF UUID VALID: True
-[+] BIFF VERSION: 210
-[+] BIFF UUID: 0a8f2fe8-87ba-5235-8fbc-9fc82c694485      
+[+] BIFF VERSION: 211
+[+] BIFF ENCODER VERSION: 111
+[+] BIFF ENCODER FLAGS: 18
 [+] BIFF TIME: 17/02/2020 02:13:48.776285
 [+] BIFF NAME: b'Name for BIFF data packet'
 [+] BIFF DESCRIPTION: b'Description for BIFF data packet'
