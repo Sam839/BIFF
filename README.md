@@ -5,7 +5,7 @@ Binary Interchange File Format
 To work, you need module `multimethod` (https://pypi.org/project/multimethod/)
 
 # BIFF classes
-```
+```python
 # FlagsBIFF
 FlagsBIFF.FL_NONE = 0
 FlagsBIFF.FL_DEFAULT = 1
@@ -33,7 +33,7 @@ BinaryIO(initial_bytes) # Buffered I/O implementation using an in-memory bytes b
 ```
 
 # Methods of BIFF classes
-```
+```python
 # BIFF
 BIFF->IO # @property
 BIFF->Encode() # Encoding data
@@ -54,7 +54,7 @@ BinaryIO->GetData() # Get all data from the IO buffer
 ```
 
 # Example
-```
+```python
 from BIFF import BIFF, FlagsBIFF
 
 # Encode
